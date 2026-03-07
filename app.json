@@ -9,6 +9,11 @@
       "package": "com.zero.assistant",
       "permissions": ["RECORD_AUDIO", "INTERNET"]
     },
-    "scheme": "zero"
+    "scheme": "zero",
+    "extra": {
+      "eas": {
+        "projectId": "462fb291-5dc2-4e12-928c-cf592fcd32f5"
+      }
+    }
   }
 }
