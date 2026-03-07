@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Zero",
-    "slug": "zero-assistant",
+    "slug": "zero-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
