@@ -11,8 +11,8 @@ import * as Linking from 'expo-linking';
 WebBrowser.maybeCompleteAuthSession();
 
 // 🔑 YOUR KEYS HERE
-const ANTHROPIC_API_KEY = 'YOUR_API_KEY_HERE';
-const GOOGLE_CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID_HERE';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 
 // Google OAuth config
 const SCOPES = [
