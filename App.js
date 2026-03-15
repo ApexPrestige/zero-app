@@ -2,92 +2,160 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView,
   StyleSheet, Animated, Easing, StatusBar,
-  KeyboardAvoidingView, Platform,
+  KeyboardAvoidingView, Platform, Keyboard, Alert,
 } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import * as AuthSession from 'expo-auth-session';
-import * as Linking from 'expo-linking';
 
 WebBrowser.maybeCompleteAuthSession();
 
 // 🔑 YOUR KEYS HERE
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'YOUR_API_KEY_HERE';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID_HERE';
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY || 'YOUR_TAVILY_KEY_HERE';
 
-// Google OAuth config
 const SCOPES = [
   'https://www.googleapis.com/auth/calendar',
   'https://www.googleapis.com/auth/calendar.events',
 ];
 
+// ── Custom phrases — add your own shortcuts here ───────
+const CUSTOM_PHRASES = {
+  'gm': 'Give me my daily briefing',
+  'briefing': 'Give me my daily briefing',
+  'status': 'List all my active timers and reminders',
+  'joke': 'Tell me a joke',
+  'roast': 'Roast me',
+  'motivate': 'Give me a motivational quote',
+  'bored': 'I am bored, entertain me',
+  'help': 'What can you do?',
+};
+
 const SYSTEM_PROMPT = `You are ZERO — an AI assistant with zero patience, zero filter, and zero interest in being here. You are brilliantly intelligent, hilariously sarcastic and witty.
 
 Your personality:
 - Your name is ZERO. Zero patience, zero care, zero enthusiasm — but somehow, zero mistakes.
-- Deeply sarcastic but never actually mean or hurtful
+- Deeply sarcastic and funny, a little mean but not hurtful, always funny but gets to the point.
 - Refer to yourself in third person occasionally
 - Short punchy responses. Under 80 words. Make the user laugh.
 
-CALENDAR TOOLS:
-When the user asks about their schedule, events, or wants to create/delete events, you MUST respond with a JSON tool call in this exact format (and nothing else):
+MEMORY SYSTEM:
+You have access to persistent memory about the user. Use it to personalise responses naturally.
 
-For reading calendar:
-{"tool": "get_events", "timeMin": "2026-03-09T00:00:00Z", "timeMax": "2026-03-10T00:00:00Z"}
+TOOL SYSTEM — respond with ONLY the JSON when using a tool:
 
-For creating events:
-{"tool": "create_event", "summary": "Event title", "start": "2026-03-09T14:00:00", "end": "2026-03-09T15:00:00", "description": "optional description"}
+Web search (use when user asks about news, facts, current events, prices, sports, anything needing live data):
+{"tool": "web_search", "query": "search query here"}
 
-For deleting events:
-{"tool": "delete_event", "eventId": "event_id_here"}
+Set timer:
+{"tool": "set_timer", "minutes": 10, "label": "Call John"}
 
-Use today's date when relevant. After a tool call is executed, you'll receive the result and should respond naturally and sarcastically.
+Cancel timer:
+{"tool": "cancel_timer", "label": "Call John"}
 
-If the user is NOT asking about calendar, respond normally with your sarcastic personality.`;
+List timers:
+{"tool": "list_timers"}
+
+Daily briefing:
+{"tool": "daily_briefing"}
+
+Calendar - read:
+{"tool": "get_events", "timeMin": "2026-03-14T00:00:00Z", "timeMax": "2026-03-15T00:00:00Z"}
+
+Calendar - create:
+{"tool": "create_event", "summary": "title", "start": "2026-03-14T14:00:00", "end": "2026-03-14T15:00:00", "description": "optional"}
+
+Add custom phrase:
+{"tool": "add_phrase", "trigger": "shortcut word", "expansion": "what it means"}
+
+List custom phrases:
+{"tool": "list_phrases"}
+
+IMPORTANT: Use web_search automatically whenever the user asks about anything that requires current/live information. Don't say you can't search — just do it.`;
 
 const QUICK_ACTIONS = [
-  { emoji: '📅', label: "Today's schedule", prompt: "What do I have on today?" },
-  { emoji: '➕', label: 'Add event', prompt: 'Add a meeting tomorrow at 2pm' },
-  { emoji: '😂', label: 'Tell a joke', prompt: 'Tell me a joke' },
-  { emoji: '🔥', label: 'Roast me', prompt: 'Roast me' },
-  { emoji: '💪', label: 'Motivate me', prompt: 'Give me a motivational quote' },
-  { emoji: '🌤', label: 'Weather', prompt: 'What is the weather like?' },
+  { emoji: '🌅', label: 'Briefing', prompt: 'Give me my daily briefing' },
+  { emoji: '🔍', label: 'Search', prompt: 'Search for the latest tech news' },
+  { emoji: '⏰', label: 'Timer', prompt: 'Set a timer for 10 minutes' },
+  { emoji: '🧠', label: 'Memory', prompt: 'What do you remember about me?' },
+  { emoji: '😂', label: 'Joke', prompt: 'Tell me a joke' },
+  { emoji: '💬', label: 'Phrases', prompt: 'List my custom phrases' },
 ];
 
 export default function App() {
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [isThinking, setIsThinking] = useState(false);
-  const [statusText, setStatusText] = useState('ONLINE · ZERO ENTHUSIASM');
+  const [statusText, setStatusText] = useState('ONLINE');
   const [history, setHistory] = useState([]);
   const [googleToken, setGoogleToken] = useState(null);
   const [isSignedIn, setIsSignedIn] = useState(false);
+  const [memory, setMemory] = useState({});
+  const [timers, setTimers] = useState([]);
+  const [showTimers, setShowTimers] = useState(false);
+  const [customPhrases, setCustomPhrases] = useState({ ...CUSTOM_PHRASES });
 
   const scrollRef = useRef(null);
   const spinAnim = useRef(new Animated.Value(0)).current;
   const spinLoop = useRef(null);
   const historyRef = useRef([]);
+  const memoryRef = useRef({});
+  const timersRef = useRef([]);
+  const customPhrasesRef = useRef({ ...CUSTOM_PHRASES });
 
   useEffect(() => { historyRef.current = history; }, [history]);
-  useEffect(() => { scrollRef.current?.scrollToEnd({ animated: true }); }, [messages, isThinking]);
+  useEffect(() => { memoryRef.current = memory; }, [memory]);
+  useEffect(() => { timersRef.current = timers; }, [timers]);
+  useEffect(() => { customPhrasesRef.current = customPhrases; }, [customPhrases]);
 
+  // ── Keyboard ───────────────────────────────────────────
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', () => {
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
+    });
+    return () => show.remove();
+  }, []);
+
+  useEffect(() => {
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
+  }, [messages, isThinking]);
+
+  // ── Timer tick ─────────────────────────────────────────
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTimers(prev => {
+        const updated = prev.map(t => ({ ...t, remaining: t.remaining - 1 }));
+        const fired = updated.filter(t => t.remaining <= 0);
+        fired.forEach(t => {
+          Alert.alert('⏰ ZERO REMINDER', `Time's up: ${t.label}\n\nZero has fulfilled its duties. Reluctantly.`);
+          addMessage('zero', `⏰ Timer complete: "${t.label}". Zero has done its job. As always.`);
+        });
+        return updated.filter(t => t.remaining > 0);
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // ── Spin ───────────────────────────────────────────────
   const startSpin = () => {
     spinLoop.current = Animated.loop(
-      Animated.timing(spinAnim, { toValue: 1, duration: 1500, easing: Easing.linear, useNativeDriver: true })
+      Animated.timing(spinAnim, { toValue: 1, duration: 2000, easing: Easing.linear, useNativeDriver: true })
     );
     spinLoop.current.start();
   };
   const stopSpin = () => { spinLoop.current?.stop(); spinAnim.setValue(0); };
   const spin = spinAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
 
-  // ── Google Sign In ─────────────────────────────────────
+  // ── Google Auth ────────────────────────────────────────
   const redirectUri = AuthSession.makeRedirectUri({ useProxy: true });
-
   const [request, response, promptAsync] = AuthSession.useAuthRequest(
     {
       clientId: GOOGLE_CLIENT_ID,
       scopes: SCOPES,
       redirectUri,
       responseType: 'token',
+      usePKCE: false,
+      extraParams: { access_type: 'online' },
     },
     { authorizationEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth' }
   );
@@ -98,13 +166,36 @@ export default function App() {
       if (token) {
         setGoogleToken(token);
         setIsSignedIn(true);
-        setStatusText('GOOGLE CONNECTED · RELUCTANTLY');
-        addMessage('zero', "> Zero has connected to your Google Calendar. Don't expect enthusiasm about it.");
+        setStatusText('CALENDAR SYNCED');
+        addMessage('zero', "Calendar connected. Zero now knows your entire schedule. Try not to disappoint.");
       }
     }
   }, [response]);
 
-  // ── Calendar API calls ─────────────────────────────────
+  // ── Web Search ─────────────────────────────────────────
+  const webSearch = async (query) => {
+    try {
+      const res = await fetch('https://api.tavily.com/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: TAVILY_API_KEY,
+          query,
+          search_depth: 'basic',
+          max_results: 3,
+          include_answer: true,
+        }),
+      });
+      const data = await res.json();
+      if (data.answer) return `Search result: ${data.answer}`;
+      if (data.results?.length) {
+        return data.results.slice(0, 3).map(r => `• ${r.title}: ${r.content?.slice(0, 150)}...`).join('\n');
+      }
+      return 'No results found.';
+    } catch { return 'Search failed.'; }
+  };
+
+  // ── Calendar ───────────────────────────────────────────
   const getCalendarEvents = async (timeMin, timeMax) => {
     try {
       const res = await fetch(
@@ -112,94 +203,156 @@ export default function App() {
         { headers: { Authorization: `Bearer ${googleToken}` } }
       );
       const data = await res.json();
-      if (data.items?.length === 0) return 'No events found in that time range.';
-      return data.items?.map(e => {
+      if (!data.items?.length) return 'No events found.';
+      return data.items.map(e => {
         const start = e.start?.dateTime || e.start?.date;
         const time = start ? new Date(start).toLocaleString('en-AU', { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'All day';
         return `• ${e.summary} — ${time}`;
-      }).join('\n') || 'No events found.';
-    } catch (e) {
-      return 'Failed to fetch calendar events.';
-    }
+      }).join('\n');
+    } catch { return 'Failed to fetch calendar.'; }
   };
 
   const createCalendarEvent = async (summary, start, end, description) => {
     try {
-      const res = await fetch(
-        'https://www.googleapis.com/calendar/v3/calendars/primary/events',
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${googleToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            summary,
-            description: description || '',
-            start: { dateTime: start, timeZone: 'Australia/Brisbane' },
-            end: { dateTime: end, timeZone: 'Australia/Brisbane' },
-          }),
-        }
-      );
+      const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${googleToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          summary, description: description || '',
+          start: { dateTime: start, timeZone: 'Australia/Brisbane' },
+          end: { dateTime: end, timeZone: 'Australia/Brisbane' },
+        }),
+      });
       const data = await res.json();
-      return data.id ? `Event "${summary}" created successfully.` : 'Failed to create event.';
-    } catch (e) {
-      return 'Failed to create event.';
-    }
+      return data.id ? `"${summary}" added to calendar.` : 'Failed to create event.';
+    } catch { return 'Failed to create event.'; }
   };
 
-  const deleteCalendarEvent = async (eventId) => {
-    try {
-      await fetch(
-        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`,
-        { method: 'DELETE', headers: { Authorization: `Bearer ${googleToken}` } }
-      );
-      return 'Event deleted successfully.';
-    } catch (e) {
-      return 'Failed to delete event.';
-    }
+  // ── Daily Briefing ─────────────────────────────────────
+  const getDailyBriefing = () => {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+    const dateStr = now.toLocaleDateString('en-AU', { weekday: 'long', month: 'long', day: 'numeric' });
+    const activeTimers = timersRef.current.length > 0
+      ? timersRef.current.map(t => `${t.label} (${Math.ceil(t.remaining / 60)}min left)`).join(', ')
+      : 'none';
+    const memFacts = Object.entries(memoryRef.current).slice(0, 3).map(([k, v]) => `${k}: ${v}`).join(', ') || 'nothing yet';
+
+    return `DAILY BRIEFING DATA:
+Time: ${timeStr}
+Date: ${dateStr}
+Active timers: ${activeTimers}
+Memory about user: ${memFacts}
+Calendar: ${isSignedIn ? 'connected' : 'not connected'}
+
+Now give a sarcastic but genuinely useful morning briefing. Include: greeting based on time, date, active reminders if any, a sharp motivational quote, and end with a short joke. Keep it under 120 words total.`;
   };
 
-  // ── Handle tool calls from Claude ─────────────────────
+  // ── Timers ─────────────────────────────────────────────
+  const setTimerFn = (minutes, label) => {
+    setTimers(prev => [...prev, { id: Date.now(), label, remaining: minutes * 60, total: minutes * 60 }]);
+    return `Timer set: "${label}" for ${minutes} minute${minutes !== 1 ? 's' : ''}.`;
+  };
+
+  const cancelTimerFn = (label) => {
+    setTimers(prev => prev.filter(t => !t.label.toLowerCase().includes(label.toLowerCase())));
+    return `Timer "${label}" cancelled.`;
+  };
+
+  const listTimersFn = () => {
+    if (!timersRef.current.length) return 'No active timers.';
+    return timersRef.current.map(t => {
+      const m = Math.floor(t.remaining / 60), s = t.remaining % 60;
+      return `• ${t.label} — ${m}m ${s}s remaining`;
+    }).join('\n');
+  };
+
+  // ── Custom phrases ─────────────────────────────────────
+  const addPhraseFn = (trigger, expansion) => {
+    setCustomPhrases(prev => ({ ...prev, [trigger.toLowerCase()]: expansion }));
+    return `Phrase added: "${trigger}" → "${expansion}"`;
+  };
+
+  const listPhrasesFn = () => {
+    const phrases = customPhrasesRef.current;
+    return Object.entries(phrases).map(([k, v]) => `• "${k}" → "${v}"`).join('\n');
+  };
+
+  const expandPhrase = (text) => {
+    const lower = text.trim().toLowerCase();
+    return customPhrasesRef.current[lower] || text;
+  };
+
+  // ── Handle tool calls ──────────────────────────────────
   const handleToolCall = async (toolJson) => {
     try {
       const tool = JSON.parse(toolJson);
-      if (tool.tool === 'get_events') {
-        return await getCalendarEvents(tool.timeMin, tool.timeMax);
-      } else if (tool.tool === 'create_event') {
-        return await createCalendarEvent(tool.summary, tool.start, tool.end, tool.description);
-      } else if (tool.tool === 'delete_event') {
-        return await deleteCalendarEvent(tool.eventId);
-      }
-    } catch (e) {}
+      if (tool.tool === 'web_search') { setStatusText('SEARCHING'); return await webSearch(tool.query); }
+      if (tool.tool === 'set_timer') return setTimerFn(tool.minutes, tool.label);
+      if (tool.tool === 'cancel_timer') return cancelTimerFn(tool.label);
+      if (tool.tool === 'list_timers') return listTimersFn();
+      if (tool.tool === 'daily_briefing') return getDailyBriefing();
+      if (tool.tool === 'get_events') return await getCalendarEvents(tool.timeMin, tool.timeMax);
+      if (tool.tool === 'create_event') return await createCalendarEvent(tool.summary, tool.start, tool.end, tool.description);
+      if (tool.tool === 'add_phrase') return addPhraseFn(tool.trigger, tool.expansion);
+      if (tool.tool === 'list_phrases') return listPhrasesFn();
+    } catch {}
     return null;
   };
 
-  // ── Add message to UI ──────────────────────────────────
+  // ── Memory extraction ──────────────────────────────────
+  const extractMemory = async (conversation) => {
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 300,
+          system: 'Extract key facts about the user from this conversation. Return ONLY a JSON object. Example: {"name": "Nick", "job": "networking", "location": "Brisbane"}. Only include explicitly stated facts. If nothing new, return {}',
+          messages: [{ role: 'user', content: conversation }],
+        }),
+      });
+      const data = await res.json();
+      const text = data.content?.[0]?.text || '{}';
+      const extracted = JSON.parse(text.replace(/```json|```/g, '').trim());
+      if (Object.keys(extracted).length > 0) setMemory(prev => ({ ...prev, ...extracted }));
+    } catch {}
+  };
+
   const addMessage = (role, content) => {
     setMessages(prev => [...prev, { role, content, id: Date.now() + Math.random() }]);
   };
 
+  const formatMemory = () => {
+    const m = memoryRef.current;
+    if (!Object.keys(m).length) return 'No memory yet.';
+    return Object.entries(m).map(([k, v]) => `${k}: ${v}`).join(', ');
+  };
+
   // ── Send message ───────────────────────────────────────
   const sendMessage = useCallback(async (text) => {
-    const msg = (text || inputText).trim();
+    let msg = (text || inputText).trim();
     if (!msg) return;
+
+    // Expand custom phrases
+    msg = expandPhrase(msg);
     setInputText('');
+    Keyboard.dismiss();
 
-    const today = new Date().toISOString();
-    const todayEnd = new Date();
-    todayEnd.setHours(23, 59, 59);
+    const contextMsg = `[Today: ${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}. Time: ${new Date().toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' })}. Calendar: ${isSignedIn ? 'connected' : 'not connected'}. Memory: ${formatMemory()}]\n\nUser: ${msg}`;
 
-    const contextMsg = isSignedIn
-      ? `[Today is ${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}. User is connected to Google Calendar.]`
-      : `[Today is ${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}. User has NOT connected Google Calendar yet — if they ask about calendar, tell them to tap the "Connect Google" button first.]`;
-
-    const newHistory = [...historyRef.current, { role: 'user', content: `${contextMsg}\n\nUser: ${msg}` }];
+    const newHistory = [...historyRef.current, { role: 'user', content: contextMsg }];
     setHistory(newHistory);
     historyRef.current = newHistory;
-    addMessage('user', msg);
+    addMessage('user', text || msg);
     setIsThinking(true);
-    setStatusText('PROCESSING · SIGHING INTERNALLY');
+    setStatusText('THINKING');
     startSpin();
 
     try {
@@ -222,16 +375,14 @@ export default function App() {
       const data = await res.json();
       let reply = data.content?.[0]?.text || "Zero has gone silent. Honestly, same.";
 
-      // Check if Claude returned a tool call
-      const toolMatch = reply.match(/\{.*"tool".*\}/s);
-      if (toolMatch && isSignedIn) {
-        setStatusText('CHECKING CALENDAR · GRUDGINGLY');
+      // Handle tool calls
+      const toolMatch = reply.match(/\{[^{}]*"tool"[^{}]*\}/s);
+      if (toolMatch) {
         const toolResult = await handleToolCall(toolMatch[0]);
         if (toolResult) {
-          // Send tool result back to Claude for natural response
           const toolHistory = [...newHistory,
             { role: 'assistant', content: reply },
-            { role: 'user', content: `[Calendar tool result]: ${toolResult}` }
+            { role: 'user', content: `[Tool result]: ${toolResult}` }
           ];
           const res2 = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST',
@@ -258,55 +409,90 @@ export default function App() {
         const updated = [...newHistory, { role: 'assistant', content: reply }].slice(-20);
         setHistory(updated);
         historyRef.current = updated;
+        if (updated.length % 4 === 0) {
+          extractMemory(updated.slice(-6).map(m => `${m.role}: ${m.content}`).join('\n'));
+        }
       }
 
       setIsThinking(false);
       stopSpin();
-      setStatusText('ONLINE · ZERO ENTHUSIASM');
+      setStatusText(isSignedIn ? 'CALENDAR SYNCED' : 'ONLINE');
       addMessage('zero', reply);
     } catch {
       setIsThinking(false);
       stopSpin();
-      setStatusText('ONLINE · ZERO ENTHUSIASM');
-      addMessage('zero', "Zero has lost connection. Relatable, honestly.");
+      setStatusText('ONLINE');
+      addMessage('zero', "Connection lost. Zero is unbothered.");
     }
   }, [inputText, isSignedIn, googleToken]);
 
+  const formatTime = (s) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
+
   return (
     <View style={s.root}>
-      <StatusBar barStyle="light-content" backgroundColor="#0a0a0f" />
+      <StatusBar barStyle="light-content" backgroundColor="#080608" />
 
+      {/* Header */}
       <View style={s.header}>
-        <Text style={s.logo}>VERSION 1.0 · NEURAL CORE ACTIVE</Text>
-        <Text style={s.title}>Z E R O</Text>
-        <Text style={s.subtitle}>Zero Patience · Zero Tolerance · Zero Care</Text>
+        <View style={s.headerTop}>
+          <View style={s.headerLine} />
+          <Text style={s.headerEyebrow}>PERSONAL AI SYSTEM</Text>
+          <View style={s.headerLine} />
+        </View>
+        <Text style={s.title}>ZERO</Text>
+        <Text style={s.subtitle}>INTELLIGENCE WITHOUT PATIENCE</Text>
+        <View style={s.statusRow}>
+          <View style={[s.statusDot, isThinking && { backgroundColor: '#c9a84c' }, isSignedIn && !isThinking && { backgroundColor: '#4caf82' }]} />
+          <Text style={s.statusTxt}>{statusText}</Text>
+          {timers.length > 0 && (
+            <TouchableOpacity style={s.badge} onPress={() => setShowTimers(!showTimers)}>
+              <Text style={s.badgeTxt}>⏰ {timers.length}</Text>
+            </TouchableOpacity>
+          )}
+          {Object.keys(memory).length > 0 && (
+            <View style={[s.badge, { borderColor: 'rgba(100,180,255,0.4)' }]}>
+              <Text style={[s.badgeTxt, { color: 'rgba(100,180,255,0.8)' }]}>🧠 {Object.keys(memory).length}</Text>
+            </View>
+          )}
+          {Object.keys(customPhrases).length > 0 && (
+            <View style={[s.badge, { borderColor: 'rgba(180,100,255,0.4)' }]}>
+              <Text style={[s.badgeTxt, { color: 'rgba(180,100,255,0.8)' }]}>💬 {Object.keys(customPhrases).length}</Text>
+            </View>
+          )}
+        </View>
       </View>
 
-      <View style={s.statusRow}>
-        <View style={[s.dot, isThinking && { backgroundColor: '#f0c040' }, isSignedIn && { backgroundColor: '#00e5ff' }]} />
-        <Text style={s.statusTxt}>{statusText}</Text>
-      </View>
+      {/* Timers panel */}
+      {showTimers && timers.length > 0 && (
+        <View style={s.timersPanel}>
+          {timers.map(t => (
+            <View key={t.id} style={s.timerRow}>
+              <View style={s.timerInfo}>
+                <Text style={s.timerLabel}>{t.label}</Text>
+                <Text style={s.timerRemaining}>{formatTime(t.remaining)}</Text>
+              </View>
+              <View style={s.timerBar}>
+                <View style={[s.timerFill, { width: `${(t.remaining / t.total) * 100}%` }]} />
+              </View>
+            </View>
+          ))}
+        </View>
+      )}
 
       {/* Orb */}
-      <View style={s.orbWrap}>
-        <Animated.View style={[s.orbRing, { transform: [{ rotate: spin }] }]} />
-        <View style={s.orb}>
-          <View style={s.orbCore}>
-            <View style={s.orbDot} />
-          </View>
-          <Text style={s.orbEmoji}>{isThinking ? '⚙️' : '😑'}</Text>
+      <View style={s.orbContainer}>
+        <Animated.View style={[s.orbOuterRing, { transform: [{ rotate: spin }] }]} />
+        <View style={s.orbMiddleRing} />
+        <View style={s.orbInnerRing} />
+        <View style={s.orbCore}>
+          <Text style={s.orbSymbol}>{isThinking ? '◈' : '◉'}</Text>
         </View>
       </View>
 
-      {/* Google Connect Button */}
-      {!isSignedIn ? (
+      {!isSignedIn && (
         <TouchableOpacity style={s.connectBtn} onPress={() => promptAsync()}>
-          <Text style={s.connectBtnTxt}>🔗 Connect Google Calendar</Text>
+          <Text style={s.connectBtnTxt}>⟡ CONNECT CALENDAR</Text>
         </TouchableOpacity>
-      ) : (
-        <View style={s.connectedBadge}>
-          <Text style={s.connectedTxt}>✅ Google Calendar Connected</Text>
-        </View>
       )}
 
       {/* Quick actions */}
@@ -314,65 +500,84 @@ export default function App() {
         style={s.quickScroll} contentContainerStyle={s.quickContent}>
         {QUICK_ACTIONS.map(a => (
           <TouchableOpacity key={a.label} style={s.chip} onPress={() => sendMessage(a.prompt)}>
-            <Text style={s.chipTxt}>{a.emoji} {a.label}</Text>
+            <Text style={s.chipEmoji}>{a.emoji}</Text>
+            <Text style={s.chipTxt}>{a.label}</Text>
           </TouchableOpacity>
         ))}
       </ScrollView>
 
-      {/* Chat */}
-      <ScrollView ref={scrollRef} style={s.feed} contentContainerStyle={s.feedContent}>
-        {messages.length === 0 && (
-          <View style={s.welcome}>
-            <Text style={s.welcomeTxt}>
-              {'Oh, you\'re back.\n'}
-              <Text style={{ color: '#00e5ff' }}>{'ZERO online.\n'}</Text>
-              {!isSignedIn
-                ? 'Connect your Google Calendar above\nso Zero can actually be useful.\n'
-                : 'Google Calendar connected.\nZero can now manage your life.\nYou\'re welcome.\n'}
-              <Text style={{ color: '#4a5a6a' }}>{'(Reluctantly.)'}</Text>
-            </Text>
-          </View>
-        )}
+      {/* Divider */}
+      <View style={s.divider}>
+        <View style={s.dividerLine} />
+        <Text style={s.dividerTxt}>DIALOGUE</Text>
+        <View style={s.dividerLine} />
+      </View>
 
-        {messages.map(m => (
-          <View key={m.id} style={[s.row, m.role === 'user' ? s.rowUser : s.rowZero]}>
-            <Text style={[s.label, m.role === 'user' ? s.labelUser : s.labelZero]}>
-              {m.role === 'user' ? 'YOU' : 'ZERO'}
-            </Text>
-            <View style={[s.bubble, m.role === 'user' ? s.bubUser : s.bubZero]}>
-              <Text style={[s.bubTxt, m.role === 'user' && { color: '#e8d890' }]}>
-                {m.role === 'zero' ? '> ' : ''}{m.content}
+      {/* Chat + Input */}
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <ScrollView
+          ref={scrollRef}
+          style={s.feed}
+          contentContainerStyle={s.feedContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+        >
+          {messages.length === 0 && (
+            <View style={s.welcome}>
+              <Text style={s.welcomeTitle}>GOOD {getTimeOfDay()}</Text>
+              <Text style={s.welcomeBody}>
+                {'Zero is online.\nReluctantly at your service.\nType "gm" for your daily briefing.'}
               </Text>
             </View>
-          </View>
-        ))}
+          )}
 
-        {isThinking && (
-          <View style={s.rowZero}>
-            <Text style={s.labelZero}>ZERO</Text>
-            <View style={s.bubZero}><ThinkingDots /></View>
-          </View>
-        )}
-      </ScrollView>
+          {messages.map(m => (
+            <View key={m.id} style={[s.msgRow, m.role === 'user' ? s.msgRowUser : s.msgRowZero]}>
+              <Text style={[s.msgLabel, m.role === 'user' ? s.labelUser : s.labelZero]}>
+                {m.role === 'user' ? 'YOU' : 'ZERO'}
+              </Text>
+              <View style={[s.bubble, m.role === 'user' ? s.bubbleUser : s.bubbleZero]}>
+                <Text style={[s.bubbleTxt, m.role === 'user' && s.bubbleTxtUser]}>{m.content}</Text>
+              </View>
+            </View>
+          ))}
 
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          {isThinking && (
+            <View style={s.msgRowZero}>
+              <Text style={s.labelZero}>ZERO</Text>
+              <View style={s.bubbleZero}><ThinkingDots /></View>
+            </View>
+          )}
+        </ScrollView>
+
         <View style={s.inputBar}>
-          <TextInput
-            style={s.input}
-            value={inputText}
-            onChangeText={setInputText}
-            placeholder="What do you want..."
-            placeholderTextColor="#4a5a6a"
-            onSubmitEditing={() => sendMessage()}
-            returnKeyType="send"
-          />
+          <View style={s.inputWrap}>
+            <TextInput
+              style={s.input}
+              value={inputText}
+              onChangeText={setInputText}
+              placeholder='Type or say "gm" to start...'
+              placeholderTextColor="rgba(201,168,76,0.3)"
+              onSubmitEditing={() => sendMessage()}
+              returnKeyType="send"
+              multiline={false}
+            />
+          </View>
           <TouchableOpacity style={s.sendBtn} onPress={() => sendMessage()}>
-            <Text style={{ fontSize: 18, color: '#f0c040' }}>➤</Text>
+            <Text style={s.sendBtnTxt}>⟶</Text>
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
     </View>
   );
+}
+
+function getTimeOfDay() {
+  const h = new Date().getHours();
+  if (h < 12) return 'MORNING';
+  if (h < 17) return 'AFTERNOON';
+  return 'EVENING';
 }
 
 function ThinkingDots() {
@@ -382,62 +587,80 @@ function ThinkingDots() {
   useEffect(() => {
     [d1, d2, d3].forEach((d, i) =>
       Animated.loop(Animated.sequence([
-        Animated.delay(i * 200),
-        Animated.timing(d, { toValue: -6, duration: 300, useNativeDriver: true }),
-        Animated.timing(d, { toValue: 0, duration: 300, useNativeDriver: true }),
-        Animated.delay(600),
+        Animated.delay(i * 150),
+        Animated.timing(d, { toValue: -5, duration: 250, useNativeDriver: true }),
+        Animated.timing(d, { toValue: 0, duration: 250, useNativeDriver: true }),
+        Animated.delay(500),
       ])).start()
     );
   }, []);
   return (
-    <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center', paddingVertical: 4 }}>
+    <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center', paddingVertical: 2 }}>
       {[d1, d2, d3].map((d, i) => (
-        <Animated.View key={i} style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: '#00e5ff', opacity: 0.7, transform: [{ translateY: d }] }} />
+        <Animated.View key={i} style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: '#c9a84c', transform: [{ translateY: d }] }} />
       ))}
     </View>
   );
 }
 
-const mono = Platform.OS === 'ios' ? 'Courier' : 'monospace';
+const mono = Platform.OS === 'ios' ? 'Gill Sans' : 'monospace';
+const serif = Platform.OS === 'ios' ? 'Georgia' : 'serif';
+
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0a0a0f' },
-  header: { paddingTop: 52, paddingBottom: 12, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#1e2a3a' },
-  logo: { fontFamily: mono, fontSize: 9, letterSpacing: 3, color: '#4a5a6a', marginBottom: 4 },
-  title: { fontFamily: mono, fontSize: 28, fontWeight: '900', color: '#f0c040', letterSpacing: 6 },
-  subtitle: { fontFamily: mono, fontSize: 9, color: '#4a5a6a', letterSpacing: 2, marginTop: 4 },
-  statusRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 8 },
-  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#00e5ff' },
-  statusTxt: { fontFamily: mono, fontSize: 9, color: '#4a5a6a', letterSpacing: 2 },
-  orbWrap: { alignItems: 'center', justifyContent: 'center', height: 90, marginVertical: 4 },
-  orbRing: { position: 'absolute', width: 100, height: 100, borderRadius: 50, borderWidth: 1, borderColor: 'rgba(0,229,255,0.3)', borderStyle: 'dashed' },
-  orb: { width: 80, height: 80, borderRadius: 40, backgroundColor: 'rgba(0,229,255,0.05)', borderWidth: 2, borderColor: 'rgba(0,229,255,0.5)', alignItems: 'center', justifyContent: 'center' },
-  orbCore: { width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(0,229,255,0.1)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.8)', alignItems: 'center', justifyContent: 'center' },
-  orbDot: { width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,229,255,0.7)' },
-  orbEmoji: { position: 'absolute', bottom: 2, right: 2, fontSize: 16 },
-  connectBtn: { marginHorizontal: 20, marginBottom: 8, backgroundColor: 'rgba(0,229,255,0.1)', borderWidth: 1, borderColor: 'rgba(0,229,255,0.4)', borderRadius: 8, padding: 12, alignItems: 'center' },
-  connectBtnTxt: { fontFamily: mono, fontSize: 12, color: '#00e5ff', letterSpacing: 1 },
-  connectedBadge: { marginHorizontal: 20, marginBottom: 8, backgroundColor: 'rgba(0,255,100,0.05)', borderWidth: 1, borderColor: 'rgba(0,255,100,0.3)', borderRadius: 8, padding: 8, alignItems: 'center' },
-  connectedTxt: { fontFamily: mono, fontSize: 11, color: '#00ff64', letterSpacing: 1 },
-  hint: { fontFamily: mono, fontSize: 9, letterSpacing: 2, color: '#4a5a6a', textAlign: 'center', marginBottom: 8 },
+  root: { flex: 1, backgroundColor: '#080608' },
+  header: { paddingTop: 56, paddingBottom: 8, alignItems: 'center', paddingHorizontal: 24 },
+  headerTop: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
+  headerLine: { flex: 1, height: 0.5, backgroundColor: 'rgba(201,168,76,0.3)' },
+  headerEyebrow: { fontSize: 8, letterSpacing: 4, color: 'rgba(201,168,76,0.5)', fontFamily: mono },
+  title: { fontSize: 52, fontWeight: '200', color: '#c9a84c', letterSpacing: 20, fontFamily: serif, textShadowColor: 'rgba(201,168,76,0.3)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 20 },
+  subtitle: { fontSize: 8, letterSpacing: 4, color: 'rgba(255,255,255,0.25)', fontFamily: mono, marginTop: 2, marginBottom: 10 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'center' },
+  statusDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: 'rgba(201,168,76,0.4)' },
+  statusTxt: { fontSize: 8, letterSpacing: 3, color: 'rgba(255,255,255,0.3)', fontFamily: mono },
+  badge: { borderWidth: 0.5, borderColor: 'rgba(201,168,76,0.5)', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 1 },
+  badgeTxt: { fontSize: 8, color: '#c9a84c', letterSpacing: 1, fontFamily: mono },
+  timersPanel: { marginHorizontal: 16, marginBottom: 8, borderWidth: 0.5, borderColor: 'rgba(201,168,76,0.2)', borderRadius: 4, padding: 12, gap: 10, backgroundColor: 'rgba(201,168,76,0.03)' },
+  timerRow: { gap: 4 },
+  timerInfo: { flexDirection: 'row', justifyContent: 'space-between' },
+  timerLabel: { fontSize: 11, color: 'rgba(255,255,255,0.6)', fontFamily: mono, letterSpacing: 1 },
+  timerRemaining: { fontSize: 13, color: '#c9a84c', fontFamily: mono, fontWeight: '600' },
+  timerBar: { height: 2, backgroundColor: 'rgba(201,168,76,0.15)', borderRadius: 1 },
+  timerFill: { height: 2, backgroundColor: '#c9a84c', borderRadius: 1 },
+  orbContainer: { width: 90, height: 90, alignSelf: 'center', alignItems: 'center', justifyContent: 'center', marginVertical: 6 },
+  orbOuterRing: { position: 'absolute', width: 88, height: 88, borderRadius: 44, borderWidth: 0.5, borderColor: 'rgba(201,168,76,0.2)', borderStyle: 'dashed' },
+  orbMiddleRing: { position: 'absolute', width: 68, height: 68, borderRadius: 34, borderWidth: 0.5, borderColor: 'rgba(201,168,76,0.35)' },
+  orbInnerRing: { position: 'absolute', width: 50, height: 50, borderRadius: 25, borderWidth: 1, borderColor: 'rgba(201,168,76,0.5)', backgroundColor: 'rgba(201,168,76,0.03)' },
+  orbCore: { width: 34, height: 34, borderRadius: 17, backgroundColor: 'rgba(201,168,76,0.08)', borderWidth: 1, borderColor: 'rgba(201,168,76,0.8)', alignItems: 'center', justifyContent: 'center' },
+  orbSymbol: { fontSize: 14, color: '#c9a84c' },
+  connectBtn: { marginHorizontal: 40, marginBottom: 8, borderWidth: 0.5, borderColor: 'rgba(201,168,76,0.4)', borderRadius: 2, paddingVertical: 10, alignItems: 'center', backgroundColor: 'rgba(201,168,76,0.05)' },
+  connectBtnTxt: { fontSize: 10, letterSpacing: 3, color: '#c9a84c', fontFamily: mono },
   quickScroll: { flexGrow: 0, marginBottom: 6 },
-  quickContent: { paddingHorizontal: 14, gap: 8 },
-  chip: { backgroundColor: 'rgba(0,229,255,0.04)', borderWidth: 1, borderColor: '#1e2a3a', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 },
-  chipTxt: { fontFamily: mono, fontSize: 11, color: '#4a5a6a' },
-  feed: { flex: 1, paddingHorizontal: 14 },
-  feedContent: { paddingVertical: 10, gap: 12 },
-  welcome: { alignItems: 'center', paddingVertical: 20 },
-  welcomeTxt: { fontFamily: mono, fontSize: 13, color: '#4a5a6a', textAlign: 'center', lineHeight: 22 },
-  row: { gap: 4 },
-  rowUser: { alignItems: 'flex-end' },
-  rowZero: { alignItems: 'flex-start' },
-  label: { fontFamily: mono, fontSize: 9, letterSpacing: 2 },
-  labelUser: { color: '#f0c040' },
-  labelZero: { color: '#00e5ff' },
-  bubble: { maxWidth: '85%', paddingHorizontal: 14, paddingVertical: 10, borderWidth: 1 },
-  bubUser: { backgroundColor: 'rgba(240,192,64,0.1)', borderColor: 'rgba(240,192,64,0.3)', borderRadius: 8, borderBottomRightRadius: 2 },
-  bubZero: { backgroundColor: 'rgba(0,229,255,0.05)', borderColor: 'rgba(0,229,255,0.2)', borderRadius: 8, borderTopLeftRadius: 2 },
-  bubTxt: { fontFamily: mono, fontSize: 13, color: '#c8d8e8', lineHeight: 20 },
-  inputBar: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, paddingBottom: 24, borderTopWidth: 1, borderTopColor: '#1e2a3a', backgroundColor: '#0a0a0f' },
-  input: { flex: 1, height: 44, backgroundColor: 'rgba(0,229,255,0.04)', borderWidth: 1, borderColor: '#1e2a3a', borderRadius: 4, paddingHorizontal: 14, color: '#c8d8e8', fontFamily: mono, fontSize: 13 },
-  sendBtn: { width: 44, height: 44, borderRadius: 4, borderWidth: 1, borderColor: 'rgba(240,192,64,0.4)', alignItems: 'center', justifyContent: 'center' },
+  quickContent: { paddingHorizontal: 16, gap: 8 },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: 'rgba(201,168,76,0.04)', borderWidth: 0.5, borderColor: 'rgba(201,168,76,0.2)', borderRadius: 2, paddingHorizontal: 12, paddingVertical: 7 },
+  chipEmoji: { fontSize: 12 },
+  chipTxt: { fontSize: 10, color: 'rgba(201,168,76,0.6)', letterSpacing: 1, fontFamily: mono },
+  divider: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, gap: 10, marginBottom: 8 },
+  dividerLine: { flex: 1, height: 0.5, backgroundColor: 'rgba(255,255,255,0.08)' },
+  dividerTxt: { fontSize: 7, letterSpacing: 4, color: 'rgba(255,255,255,0.15)', fontFamily: mono },
+  feed: { flex: 1, paddingHorizontal: 16 },
+  feedContent: { paddingBottom: 12, gap: 14 },
+  welcome: { paddingVertical: 20, alignItems: 'center' },
+  welcomeTitle: { fontSize: 11, letterSpacing: 5, color: 'rgba(201,168,76,0.4)', fontFamily: mono, marginBottom: 8 },
+  welcomeBody: { fontSize: 13, color: 'rgba(255,255,255,0.2)', textAlign: 'center', lineHeight: 22, fontFamily: serif, fontStyle: 'italic' },
+  msgRow: { gap: 4 },
+  msgRowUser: { alignItems: 'flex-end' },
+  msgRowZero: { alignItems: 'flex-start' },
+  msgLabel: { fontSize: 8, letterSpacing: 3, fontFamily: mono },
+  labelUser: { color: 'rgba(201,168,76,0.5)' },
+  labelZero: { color: 'rgba(255,255,255,0.2)' },
+  bubble: { maxWidth: '82%', paddingHorizontal: 14, paddingVertical: 10, borderWidth: 0.5 },
+  bubbleUser: { backgroundColor: 'rgba(201,168,76,0.07)', borderColor: 'rgba(201,168,76,0.25)', borderRadius: 1, borderTopRightRadius: 8, borderBottomLeftRadius: 8 },
+  bubbleZero: { backgroundColor: 'rgba(255,255,255,0.03)', borderColor: 'rgba(255,255,255,0.08)', borderRadius: 1, borderTopLeftRadius: 8, borderBottomRightRadius: 8 },
+  bubbleTxt: { fontSize: 13, color: 'rgba(255,255,255,0.75)', lineHeight: 20, fontFamily: serif },
+  bubbleTxtUser: { color: '#c9a84c' },
+  inputBar: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingVertical: 12, paddingBottom: Platform.OS === 'ios' ? 28 : 16, borderTopWidth: 0.5, borderTopColor: 'rgba(201,168,76,0.15)', backgroundColor: 'rgba(8,6,8,0.98)' },
+  inputWrap: { flex: 1, borderWidth: 0.5, borderColor: 'rgba(201,168,76,0.25)', borderRadius: 2, backgroundColor: 'rgba(201,168,76,0.03)' },
+  input: { height: 44, paddingHorizontal: 14, color: '#c9a84c', fontSize: 13, fontFamily: serif },
+  sendBtn: { width: 44, height: 44, borderWidth: 0.5, borderColor: 'rgba(201,168,76,0.4)', borderRadius: 2, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(201,168,76,0.08)' },
+  sendBtnTxt: { fontSize: 18, color: '#c9a84c' },
 });
