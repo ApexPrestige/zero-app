@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "sdkVersion": "52.0.0",
+    "sdkVersion": "51.0.0",
     "android": {
       "package": "com.zero.assistant",
       "permissions": ["RECORD_AUDIO", "INTERNET"]
